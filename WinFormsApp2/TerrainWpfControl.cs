@@ -1,4 +1,5 @@
-﻿using HelixToolkit.Wpf;
+﻿
+using HelixToolkit.Wpf;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -33,6 +34,14 @@ namespace WinFormsApp2
         private bool _curvatureEnabled = false;
         private double _verticalExag = 1.0;
         private int _colorMapIndex = 0;
+        private ModelVisual3D? _routePointsVisual;
+        private ModelVisual3D? _routeLinesVisual;
+        private BillboardTextGroupVisual3D? _routeLabelsVisual;
+        private ModelVisual3D? _routePoints;
+        private LinesVisual3D? _routeLines;
+        private List<BillboardTextVisual3D> _routeLabels = new();
+        private Vector3D? _curvatureOrigin = null;
+        private List<RoutePoint>? _routeCache = null;
 
         public TerrainWpfControl()
         {
@@ -117,6 +126,7 @@ namespace WinFormsApp2
         private void BuildTerrain()
         {
             if (_heights == null) return;
+            _curvatureOrigin = null;
 
             int rows = _heights.Length;
             int cols = _heights[0].Length;
@@ -168,6 +178,17 @@ namespace WinFormsApp2
                         double px = radius * Math.Sin(phi) * Math.Cos(theta);
                         double py = radius * Math.Sin(phi) * Math.Sin(theta);
                         double pz = radius * Math.Cos(phi);
+
+                        // Normalize curvature so the area stays centered in local space
+                        if (_curvatureEnabled)
+                        {
+                            if (_curvatureOrigin == null)
+                                _curvatureOrigin = new Vector3D(px, py, pz);
+
+                            px -= _curvatureOrigin.Value.X;
+                            py -= _curvatureOrigin.Value.Y;
+                            pz -= _curvatureOrigin.Value.Z;
+                        }
 
                         mesh.Positions.Add(new Point3D(px, py, pz));
                     }
@@ -245,6 +266,7 @@ namespace WinFormsApp2
 
             _terrainModel = new GeometryModel3D(mesh, mat) { BackMaterial = back };
             _rootModel.Children.Add(_terrainModel);
+            RebuildRoute();
         }
 
         // Build a bitmap where pixel (x,y) corresponds to height at [row=y][col=x]
@@ -311,5 +333,305 @@ namespace WinFormsApp2
                 (byte)(a.B + (b.B - a.B) * t)
             );
         }
+
+        //public void SetRoute(List<RoutePoint> route)
+        //{
+        //    if (_heights == null || route == null || route.Count == 0)
+        //        return;
+
+        //    ClearRoute();
+
+        //    _routePoints = new ModelVisual3D();
+        //    _routeLines = new LinesVisual3D()
+        //    {
+        //        Color = Colors.Yellow,
+        //        Thickness = 2
+        //    };
+
+        //    Point3D? prev = null;
+
+        //    foreach (var p in route)
+        //    {
+        //        var pos = ConvertGeoToPoint(p.Latitude, p.Longitude, p.HeightAboveTerrain);
+
+        //        // линия
+        //        if (prev != null)
+        //        {
+        //            _routeLines.Points.Add(prev.Value);
+        //            _routeLines.Points.Add(pos);
+        //        }
+        //        prev = pos;
+
+        //        // точка
+        //        var sphere = new SphereVisual3D()
+        //        {
+        //            Center = pos,
+        //            Radius = 3,
+        //            Material = new DiffuseMaterial(
+        //                new SolidColorBrush(p.Id == route[0].Id ? Colors.Lime : Colors.Red))
+        //        };
+
+        //        _routePoints.Children.Add(sphere);
+
+        //        // лейбл
+        //        var label = new BillboardTextVisual3D()
+        //        {
+        //            Text = $"#{p.Id}\nLat={p.Latitude:F5}\nLon={p.Longitude:F5}\nΔH={p.HeightAboveTerrain:F1} m",
+        //            Position = new Point3D(pos.X, pos.Y + 10, pos.Z),
+        //            Background = Brushes.Black,
+        //            Foreground = Brushes.White
+        //        };
+
+        //        _routeLabels.Add(label);
+        //        _view.Children.Add(label);
+        //    }
+
+        //    _view.Children.Add(_routePoints);
+        //    _view.Children.Add(_routeLines);
+        //}
+
+        public void SetRoute(List<RoutePoint> route)
+        {
+            _routeCache = route;     // запоминаем оригинальный маршрут
+            RebuildRoute();          // строим визуализацию
+        }
+
+        private void RebuildRoute()
+        {
+            if (_routeCache == null || _heights == null)
+                return;
+
+            // полностью пересобираем визуализацию маршрута
+            ClearRoute();
+
+            _routePoints = new ModelVisual3D();
+            _routeLines = new LinesVisual3D()
+            {
+                Color = Colors.Yellow,
+                Thickness = 2
+            };
+
+            Point3D? prev = null;
+
+            foreach (var p in _routeCache)
+            {
+                var pos = ConvertGeoToPoint(p.Latitude, p.Longitude, p.HeightAboveTerrain);
+
+                if (prev != null)
+                {
+                    _routeLines.Points.Add(prev.Value);
+                    _routeLines.Points.Add(pos);
+                }
+                prev = pos;
+
+                // точка
+                var sphere = new SphereVisual3D()
+                {
+                    Center = pos,
+                    Radius = 3,
+                    Material = new DiffuseMaterial(
+                        new SolidColorBrush(p.Id == _routeCache[0].Id ? Colors.Lime : Colors.Red))
+                };
+
+                _routePoints.Children.Add(sphere);
+
+                // лейбл
+                var label = new BillboardTextVisual3D()
+                {
+                    Text = $"#{p.Id}\nLat={p.Latitude:F5}\nLon={p.Longitude:F5}\nΔH={p.HeightAboveTerrain:F1}",
+                    Position = new Point3D(pos.X, pos.Y + 10, pos.Z),
+                    Background = Brushes.Black,
+                    Foreground = Brushes.White
+                };
+
+                _routeLabels.Add(label);
+                _view.Children.Add(label);
+            }
+
+            _view.Children.Add(_routePoints);
+            _view.Children.Add(_routeLines);
+        }
+
+        private void ClearRoute()
+        {
+            if (_routePoints != null)
+                _view.Children.Remove(_routePoints);
+
+            if (_routeLines != null)
+                _view.Children.Remove(_routeLines);
+
+            foreach (var label in _routeLabels)
+                _view.Children.Remove(label);
+
+            _routeLabels.Clear();
+            _routePoints = null;
+            _routeLines = null;
+        }
+
+        private Point3D ConvertGeoToPoint(double lat, double lon, double extraHeight)
+        {
+            if (_heights == null)
+                return new Point3D(0, 0, 0);
+
+            int rows = _heights.Length;
+            int cols = _heights[0].Length;
+
+            // Safety
+            double totalLonDiff = _end.Longitude - _start.Longitude;
+            if (Math.Abs(totalLonDiff) < 1e-12) totalLonDiff = 1e-12;
+
+            // Fraction along columns (continuous, 0..1)
+            double fx = (lon - _start.Longitude) / totalLonDiff;
+            fx = Math.Max(0.0, Math.Min(1.0, fx));
+
+            // fractional column position in grid coordinates (0 .. cols-1)
+            double colPos = fx * (cols - 1);
+
+            // choose fractional row (we historically used middle row)
+            double rowPos = (rows - 1) / 2.0;
+
+            double dx = _widthMeters / (cols - 1);
+            double dy = _heightMeters / (rows - 1);
+
+            // x,y in meters (exact, using fractional col/row)
+            double x = (colPos - (cols - 1) / 2.0) * dx;
+            double y = ((rows - 1) / 2.0 - rowPos) * dy;
+
+            // Bilinear interpolation of terrain height at fractional (rowPos, colPos)
+            int c0 = (int)Math.Floor(colPos);
+            int c1 = Math.Min(cols - 1, c0 + 1);
+            int r0 = (int)Math.Floor(rowPos);
+            int r1 = Math.Min(rows - 1, r0 + 1);
+
+            double s = colPos - c0; // frac along columns
+            double t = rowPos - r0; // frac along rows (should be 0 if rowPos exactly middle integer)
+
+            // fetch heights safely
+            double h00 = _heights[r0][c0];
+            double h10 = _heights[r0][c1];
+            double h01 = _heights[r1][c0];
+            double h11 = _heights[r1][c1];
+
+            // bilinear
+            double h0 = h00 * (1 - s) + h10 * s;
+            double h1 = h01 * (1 - s) + h11 * s;
+            double terrainBase = h0 * (1 - t) + h1 * t;
+
+            // apply vertical exaggeration and extra height
+            double finalH = terrainBase * _verticalExag + extraHeight;
+
+            // If no curvature, return local XY + height
+            if (!_curvatureEnabled)
+            {
+                return new Point3D(x, y, finalH);
+            }
+
+            // For curvature: need to compute latPoint/lonPoint exactly as in BuildTerrain
+            // compute lat at this column like BuildTerrain did (lat lerp by fx)
+            double latAtCol = _start.Latitude * (1 - fx) + _end.Latitude * fx;
+            double metersPerDegLat = 111132.0;
+            double metersPerDegLon = 111319.0 * Math.Cos(latAtCol * Math.PI / 180.0);
+
+            double lonPoint = (_start.Longitude * (1 - fx) + _end.Longitude * fx) + x / metersPerDegLon;
+            double latPoint = latAtCol + y / metersPerDegLat;
+
+            const double R = 6_371_000.0;
+            double phi = (90.0 - latPoint) * Math.PI / 180.0;
+            double theta = (lonPoint + 180.0) * Math.PI / 180.0;
+
+            double radius = R + finalH;
+
+            double px = radius * Math.Sin(phi) * Math.Cos(theta);
+            double py = radius * Math.Sin(phi) * Math.Sin(theta);
+            double pz = radius * Math.Cos(phi);
+
+            // subtract same origin as BuildTerrain used (if computed)
+            if (_curvatureOrigin != null)
+            {
+                px -= _curvatureOrigin.Value.X;
+                py -= _curvatureOrigin.Value.Y;
+                pz -= _curvatureOrigin.Value.Z;
+            }
+
+            return new Point3D(px, py, pz);
+        }
+
+
+
+        private Point3D ConvertGeoToScenePoint(double lat, double lon, double extraHeight)
+        {
+            if (_heights == null)
+                return new Point3D(0, 0, 0);
+
+            int rows = _heights.Length;
+            int cols = _heights[0].Length;
+
+            double totalLonDiff = _end.Longitude - _start.Longitude;
+            if (Math.Abs(totalLonDiff) < 1e-12) totalLonDiff = 1e-12;
+
+            double fx = (lon - _start.Longitude) / totalLonDiff;
+            fx = Math.Max(0.0, Math.Min(1.0, fx));
+
+            double colPos = fx * (cols - 1);
+            double rowPos = (rows - 1) / 2.0;
+
+            double dx = _widthMeters / (cols - 1);
+            double dy = _heightMeters / (rows - 1);
+
+            double x = (colPos - (cols - 1) / 2.0) * dx;
+            double y = ((rows - 1) / 2.0 - rowPos) * dy;
+
+            // bilinear interpolation for height
+            int c0 = (int)Math.Floor(colPos);
+            int c1 = Math.Min(cols - 1, c0 + 1);
+            int r0 = (int)Math.Floor(rowPos);
+            int r1 = Math.Min(rows - 1, r0 + 1);
+
+            double s = colPos - c0;
+            double t = rowPos - r0;
+
+            double h00 = _heights[r0][c0];
+            double h10 = _heights[r0][c1];
+            double h01 = _heights[r1][c0];
+            double h11 = _heights[r1][c1];
+
+            double h0 = h00 * (1 - s) + h10 * s;
+            double h1 = h01 * (1 - s) + h11 * s;
+            double terrainBase = h0 * (1 - t) + h1 * t;
+
+            double finalH = terrainBase * _verticalExag + extraHeight;
+
+            if (!_curvatureEnabled)
+            {
+                return new Point3D(x, y, finalH);
+            }
+
+            double latAtCol = _start.Latitude * (1 - fx) + _end.Latitude * fx;
+            double metersPerDegLat = 111132.0;
+            double metersPerDegLon = 111319.0 * Math.Cos(latAtCol * Math.PI / 180.0);
+
+            double lonPoint = (_start.Longitude * (1 - fx) + _end.Longitude * fx) + x / metersPerDegLon;
+            double latPoint = latAtCol + y / metersPerDegLat;
+
+            const double R = 6_371_000.0;
+            double phi = (90.0 - latPoint) * Math.PI / 180.0;
+            double theta = (lonPoint + 180.0) * Math.PI / 180.0;
+
+            double radius = R + finalH;
+
+            double px = radius * Math.Sin(phi) * Math.Cos(theta);
+            double py = radius * Math.Sin(phi) * Math.Sin(theta);
+            double pz = radius * Math.Cos(phi);
+
+            if (_curvatureOrigin != null)
+            {
+                px -= _curvatureOrigin.Value.X;
+                py -= _curvatureOrigin.Value.Y;
+                pz -= _curvatureOrigin.Value.Z;
+            }
+
+            return new Point3D(px, py, pz);
+        }
+
     }
 }

@@ -64,6 +64,7 @@ namespace WinFormsApp2
 
             // Load sample data and render
             LoadSampleDataAndRender();
+            LoadSampleRoute();
         }
 
         private void LoadSampleDataAndRender()
@@ -82,6 +83,19 @@ namespace WinFormsApp2
             _terrainControl.SetData(heights, start, end, widthMeters, heightMeters);
             _terrainControl.SetVerticalExaggeration(_tbVerticalExaggeration.Value / 10.0);
             _terrainControl.SetColorMap(_cbColorMap.SelectedIndex);
+        }
+
+        private void LoadSampleRoute()
+        {
+            var route = new List<RoutePoint>()
+    {
+        new RoutePoint { Id=1, Latitude=55.7501, Longitude=37.5905, HeightAboveTerrain=10 },
+        new RoutePoint { Id=2, Latitude=55.7503, Longitude=37.5950, HeightAboveTerrain=20 },
+        new RoutePoint { Id=3, Latitude=55.7499, Longitude=37.6001, HeightAboveTerrain=15 },
+        new RoutePoint { Id=4, Latitude=55.7498, Longitude=37.6058, HeightAboveTerrain=5 },
+    };
+
+            _terrainControl.SetRoute(route);
         }
     }
 }
