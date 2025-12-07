@@ -11,6 +11,7 @@ namespace WinFormsApp2
         private CheckBox _cbCurvature;
         private Label _lblExag;
         private ComboBox _cbColorMap;
+        private bool _flightEnabled = false;
         public Form1()
         {
             InitializeComponent();
@@ -61,6 +62,17 @@ namespace WinFormsApp2
             };
             _cbCurvature.CheckedChanged += (s, e) => _terrainControl.SetCurvatureEnabled(_cbCurvature.Checked);
             _cbColorMap.SelectedIndexChanged += (s, e) => _terrainControl.SetColorMap(_cbColorMap.SelectedIndex);
+
+            var btnFly = new Button { Text = "Flight mode", Left = 980, Top = 8, Width = 120 };
+            panel.Controls.Add(btnFly);
+
+            btnFly.Click += (s, e) =>
+            {
+                bool newState = !_flightEnabled;
+                _flightEnabled = newState;
+                _terrainControl.EnableFlightMode(newState);
+                btnFly.Text = newState ? "Flight: ON" : "Flight mode";
+            };
 
             // Load sample data and render
             LoadSampleDataAndRender();

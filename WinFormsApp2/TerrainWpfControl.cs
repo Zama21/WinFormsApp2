@@ -6,11 +6,14 @@ using System.Linq;
 using System.Reflection.Metadata;
 using System.Text;
 using System.Threading.Tasks;
+using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Media.Media3D;
 using Brushes = System.Windows.Media.Brushes;
 using Color = System.Windows.Media.Color;
+using KeyEventArgs = System.Windows.Input.KeyEventArgs;
+using MouseEventArgs = System.Windows.Input.MouseEventArgs;
 
 namespace WinFormsApp2
 {
@@ -334,61 +337,6 @@ namespace WinFormsApp2
             );
         }
 
-        //public void SetRoute(List<RoutePoint> route)
-        //{
-        //    if (_heights == null || route == null || route.Count == 0)
-        //        return;
-
-        //    ClearRoute();
-
-        //    _routePoints = new ModelVisual3D();
-        //    _routeLines = new LinesVisual3D()
-        //    {
-        //        Color = Colors.Yellow,
-        //        Thickness = 2
-        //    };
-
-        //    Point3D? prev = null;
-
-        //    foreach (var p in route)
-        //    {
-        //        var pos = ConvertGeoToPoint(p.Latitude, p.Longitude, p.HeightAboveTerrain);
-
-        //        // линия
-        //        if (prev != null)
-        //        {
-        //            _routeLines.Points.Add(prev.Value);
-        //            _routeLines.Points.Add(pos);
-        //        }
-        //        prev = pos;
-
-        //        // точка
-        //        var sphere = new SphereVisual3D()
-        //        {
-        //            Center = pos,
-        //            Radius = 3,
-        //            Material = new DiffuseMaterial(
-        //                new SolidColorBrush(p.Id == route[0].Id ? Colors.Lime : Colors.Red))
-        //        };
-
-        //        _routePoints.Children.Add(sphere);
-
-        //        // лейбл
-        //        var label = new BillboardTextVisual3D()
-        //        {
-        //            Text = $"#{p.Id}\nLat={p.Latitude:F5}\nLon={p.Longitude:F5}\nΔH={p.HeightAboveTerrain:F1} m",
-        //            Position = new Point3D(pos.X, pos.Y + 10, pos.Z),
-        //            Background = Brushes.Black,
-        //            Foreground = Brushes.White
-        //        };
-
-        //        _routeLabels.Add(label);
-        //        _view.Children.Add(label);
-        //    }
-
-        //    _view.Children.Add(_routePoints);
-        //    _view.Children.Add(_routeLines);
-        //}
 
         public void SetRoute(List<RoutePoint> route)
         {
@@ -632,6 +580,237 @@ namespace WinFormsApp2
 
             return new Point3D(px, py, pz);
         }
+
+        // --------------------------------------------
+        // FLIGHT MODE (manual implementation)
+        // --------------------------------------------
+        // движение
+        private bool _moveForward, _moveBackward, _moveLeft, _moveRight, _moveUp, _moveDown;
+
+        // мышь
+        private System.Windows.Point _prevMouse;
+        private bool _mouseCaptured = false;
+
+        // скорость
+        private double _flySpeed = 120;
+        private double _rotationSpeed = 0.2;
+        private double _verticalSpeed = 100;
+        private bool _flightMode = false;
+
+        public void EnableFlightMode(bool enabled)
+        {
+            _flightMode = enabled;
+
+            if (enabled)
+            {
+                // отключаем trackball
+                _view.CameraController.IsEnabled = false;
+
+                // подписываемся на ввод
+                _view.KeyDown += View_KeyDown;
+                _view.KeyUp += View_KeyUp;
+                _view.MouseDown += View_MouseDown;
+                _view.MouseUp += View_MouseUp;
+                _view.MouseMove += View_MouseMove;
+
+                CompositionTarget.Rendering += FlightTick;
+
+                _view.Focusable = true;
+                _view.Focus();
+            }
+            else
+            {
+                // отключаем обработчики
+                _view.KeyDown -= View_KeyDown;
+                _view.KeyUp -= View_KeyUp;
+                _view.MouseDown -= View_MouseDown;
+                _view.MouseUp -= View_MouseUp;
+                _view.MouseMove -= View_MouseMove;
+
+                CompositionTarget.Rendering -= FlightTick;
+
+                _mouseCaptured = false;
+                Mouse.Capture(null);
+
+                _view.CameraController.IsEnabled = true;
+            }
+        }
+
+        private void View_KeyDown(object sender, KeyEventArgs e)
+        {
+            if (!_flightMode) return;
+
+            if (e.Key == Key.W) _moveForward = true;
+            if (e.Key == Key.S) _moveBackward = true;
+            if (e.Key == Key.A) _moveLeft = true;
+            if (e.Key == Key.D) _moveRight = true;
+            if (e.Key == Key.Space) _moveUp = true;
+            if (e.Key == Key.LeftCtrl) _moveDown = true;
+        }
+
+        private void View_KeyUp(object sender, KeyEventArgs e)
+        {
+            if (!_flightMode) return;
+
+            if (e.Key == Key.W) _moveForward = false;
+            if (e.Key == Key.S) _moveBackward = false;
+            if (e.Key == Key.A) _moveLeft = false;
+            if (e.Key == Key.D) _moveRight = false;
+            if (e.Key == Key.Space) _moveUp = false;
+            if (e.Key == Key.LeftCtrl) _moveDown = false;
+        }
+
+        private void View_MouseDown(object sender, MouseButtonEventArgs e)
+        {
+            if (!_flightMode) return;
+
+            if (e.RightButton == MouseButtonState.Pressed)
+            {
+                _mouseCaptured = true;
+                _prevMouse = e.GetPosition(_view);
+                Mouse.Capture(_view);
+            }
+        }
+
+        private void View_MouseUp(object sender, MouseButtonEventArgs e)
+        {
+            if (!_flightMode) return;
+
+            if (e.RightButton == MouseButtonState.Released)
+            {
+                _mouseCaptured = false;
+                Mouse.Capture(null);
+            }
+        }
+
+        private void View_MouseMove(object sender, MouseEventArgs e)
+        {
+            if (!_flightMode || !_mouseCaptured) return;
+
+            if (_view.Camera is not ProjectionCamera cam) return;
+
+            System.Windows.Point cur = e.GetPosition(_view);
+            double dx = cur.X - _prevMouse.X;
+            double dy = cur.Y - _prevMouse.Y;
+            _prevMouse = cur;
+
+            double yaw = dx * _rotationSpeed;
+            double pitch = dy * _rotationSpeed;
+
+            // вращаем LookDirection
+            var dir = cam.LookDirection;
+
+            // создаём вращение в локальных координатах
+            var yawRot = new AxisAngleRotation3D(new Vector3D(0, 0, 1), yaw);
+            var pitchRot = new AxisAngleRotation3D(Vector3D.CrossProduct(dir, new Vector3D(0, 0, 1)), pitch);
+
+            var rot = new Matrix3D();
+            rot.Append(new RotateTransform3D(yawRot).Value);
+            rot.Append(new RotateTransform3D(pitchRot).Value);
+
+            var newDir = rot.Transform(dir);
+
+            cam.LookDirection = newDir;
+        }
+
+        private void FlightTick(object? sender, EventArgs e)
+        {
+            if (!_flightMode) return;
+
+            if (_view.Camera is not ProjectionCamera cam)
+                return;
+
+            double dt = 1 / 60.0;
+
+            Vector3D forward = cam.LookDirection;
+            forward.Normalize();
+            Vector3D right = Vector3D.CrossProduct(forward, new Vector3D(0, 0, 1));
+            right.Normalize();
+
+            Vector3D up = new Vector3D(0, 0, 1);
+
+            Vector3D move = new();
+
+            if (_moveForward) move += forward;
+            if (_moveBackward) move -= forward;
+            if (_moveLeft) move -= right;
+            if (_moveRight) move += right;
+            if (_moveUp) move += up;
+            if (_moveDown) move -= up;
+
+            if (move.LengthSquared > 0)
+                move.Normalize();
+
+            cam.Position += move * _flySpeed * dt;
+
+            // <-- НИЧЕГО БОЛЬШЕ НЕТ
+        }
+
+
+
+        // удерживаем камеру над поверхностью
+        private void KeepCameraAboveTerrain(object? sender, EventArgs e)
+        {
+            if (!_flightMode || _heights == null)
+                return;
+
+            if (_view.Camera is not ProjectionCamera cam)
+                return;
+
+            // Берём позицию камеры
+            var p = cam.Position;
+
+            // получаем высоту рельефа под камерой
+            double surface = SampleTerrainHeightLocal(p.X, p.Y);
+
+            // минимальная высота камеры над поверхностью
+            double minAltitude = 30;
+
+            if (p.Z < surface + minAltitude)
+            {
+                cam.Position = new Point3D(p.X, p.Y, surface + minAltitude);
+            }
+        }
+
+        // вычисление высоты рельефа под точкой (в локальных координатах)
+        private double SampleTerrainHeightLocal(double x, double y)
+        {
+            if (_heights == null) return 0;
+
+            int rows = _heights.Length;
+            int cols = _heights[0].Length;
+
+            double dx = _widthMeters / (cols - 1);
+            double dy = _heightMeters / (rows - 1);
+
+            // переводим обратно в координаты height-grid
+            double col = x / dx + (cols - 1) / 2.0;
+            double row = (rows - 1) / 2.0 - y / dy;
+
+            if (col < 0 || row < 0 || col >= cols - 1 || row >= rows - 1)
+                return 0;
+
+            int c0 = (int)Math.Floor(col);
+            int r0 = (int)Math.Floor(row);
+            int c1 = c0 + 1;
+            int r1 = r0 + 1;
+
+            double s = col - c0;
+            double t = row - r0;
+
+            double h00 = _heights[r0][c0];
+            double h10 = _heights[r0][c1];
+            double h01 = _heights[r1][c0];
+            double h11 = _heights[r1][c1];
+
+            // билinear
+            double h0 = h00 * (1 - s) + h10 * s;
+            double h1 = h01 * (1 - s) + h11 * s;
+            double terrain = h0 * (1 - t) + h1 * t;
+
+            return terrain * _verticalExag;
+        }
+
 
     }
 }
