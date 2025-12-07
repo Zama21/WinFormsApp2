@@ -270,6 +270,7 @@ namespace WinFormsApp2
             _terrainModel = new GeometryModel3D(mesh, mat) { BackMaterial = back };
             _rootModel.Children.Add(_terrainModel);
             RebuildRoute();
+
         }
 
         // Build a bitmap where pixel (x,y) corresponds to height at [row=y][col=x]
@@ -644,8 +645,12 @@ namespace WinFormsApp2
             if (e.Key == Key.S) _moveBackward = true;
             if (e.Key == Key.A) _moveLeft = true;
             if (e.Key == Key.D) _moveRight = true;
+
             if (e.Key == Key.Space) _moveUp = true;
-            if (e.Key == Key.LeftCtrl) _moveDown = true;
+
+            // ONLY CTRL is "down"
+            if (e.Key == Key.LeftCtrl || e.Key == Key.RightCtrl)
+                _moveDown = true;
         }
 
         private void View_KeyUp(object sender, KeyEventArgs e)
@@ -656,8 +661,11 @@ namespace WinFormsApp2
             if (e.Key == Key.S) _moveBackward = false;
             if (e.Key == Key.A) _moveLeft = false;
             if (e.Key == Key.D) _moveRight = false;
+
             if (e.Key == Key.Space) _moveUp = false;
-            if (e.Key == Key.LeftCtrl) _moveDown = false;
+
+            if (e.Key == Key.LeftCtrl || e.Key == Key.RightCtrl)
+                _moveDown = false;
         }
 
         private void View_MouseDown(object sender, MouseButtonEventArgs e)
@@ -722,12 +730,31 @@ namespace WinFormsApp2
 
             double dt = 1 / 60.0;
 
-            Vector3D forward = cam.LookDirection;
-            forward.Normalize();
+            bool sprint = Keyboard.IsKeyDown(Key.LeftShift) || Keyboard.IsKeyDown(Key.RightShift);
+            double speed = sprint ? _flySpeed * 5.0 : _flySpeed;
+
+            //Vector3D forward = cam.LookDirection;
+            //forward.Normalize();
+            //Vector3D right = Vector3D.CrossProduct(forward, new Vector3D(0, 0, 1));
+            //right.Normalize();
+
+            //Vector3D up = new Vector3D(0, 0, 1);
+
+            Vector3D look = cam.LookDirection;
+            look.Normalize();
+
+            // horizontal forward (drop Z)
+            Vector3D forward = new Vector3D(look.X, look.Y, 0);
+            if (forward.LengthSquared > 1e-6) forward.Normalize();
+
+            // horizontal right vector
             Vector3D right = Vector3D.CrossProduct(forward, new Vector3D(0, 0, 1));
             right.Normalize();
 
+            // vertical is always world-up
             Vector3D up = new Vector3D(0, 0, 1);
+
+           
 
             Vector3D move = new();
 
@@ -741,9 +768,9 @@ namespace WinFormsApp2
             if (move.LengthSquared > 0)
                 move.Normalize();
 
-            cam.Position += move * _flySpeed * dt;
+            cam.Position += move * speed * dt;
 
-            // <-- НИЧЕГО БОЛЬШЕ НЕТ
+           
         }
 
 
