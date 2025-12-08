@@ -11,6 +11,8 @@ namespace WinFormsApp2
         private CheckBox _cbCurvature;
         private Label _lblExag;
         private ComboBox _cbColorMap;
+        private Button _btnAddTile;
+
         public Form1()
         {
             InitializeComponent();
@@ -24,7 +26,7 @@ namespace WinFormsApp2
             var panel = new Panel
             {
                 Dock = DockStyle.Top,
-                Height = 48,
+                Height = 72,
                 BackColor = Color.FromArgb(240, 240, 240)
             };
             Controls.Add(panel);
@@ -47,6 +49,9 @@ namespace WinFormsApp2
             _cbColorMap.SelectedIndex = 0;
             panel.Controls.Add(_cbColorMap);
 
+            _btnAddTile = new Button { Text = "Add another tile", Left = 980, Top = 8, Width = 160 };
+            panel.Controls.Add(_btnAddTile);
+
             // Create WPF control and host it
             _terrainControl = new TerrainWpfControl();
             _host.Child = _terrainControl;
@@ -62,38 +67,74 @@ namespace WinFormsApp2
             _cbCurvature.CheckedChanged += (s, e) => _terrainControl.SetCurvatureEnabled(_cbCurvature.Checked);
             _cbColorMap.SelectedIndexChanged += (s, e) => _terrainControl.SetColorMap(_cbColorMap.SelectedIndex);
 
-            // Load sample data and render
+            _btnAddTile.Click += (s, e) => AddAnotherTileSample();
+
+            // Load sample data and render (as list of tiles)
             LoadSampleDataAndRender();
             LoadSampleRoute();
         }
 
         private void LoadSampleDataAndRender()
         {
-            int cols = 300, rows = 200; // reasonable default
+            // build one tile initially
+            int cols = 300, rows = 200;
             double[][] heights = SampleTerrainGenerator.Generate(cols, rows);
 
-            // Example geo coords for left and right midpoints (replace with your real coords)
-            GeoCoord start = new GeoCoord(55.7500, 37.5900); // left midpoint
-            GeoCoord end = new GeoCoord(55.7500, 37.6100);   // right midpoint
-
-            // Horizontal extent in meters (example: 2000m x 1500m)
+            GeoCoord start = new GeoCoord(55.7500, 37.5900);
+            GeoCoord end = new GeoCoord(55.7500, 37.6100);
             double widthMeters = 2000.0;
             double heightMeters = 1500.0;
 
-            _terrainControl.SetData(heights, start, end, widthMeters, heightMeters);
+
+            var tile = new TerrainTile(heights, start, end, widthMeters, heightMeters);
+
+
+            GeoCoord start2 = new GeoCoord(55.8500, 37.5900);
+            GeoCoord end2 = new GeoCoord(55.8500, 37.6100);
+            var tile2 = new TerrainTile(heights, start2, end2, widthMeters, heightMeters);
+
+            // If you have multiple tiles, create multiple TerrainTile instances and pass as list.
+            var tiles = new List<TerrainTile> { tile, tile2 };
+
+            _terrainControl.SetTiles(tiles);
+
             _terrainControl.SetVerticalExaggeration(_tbVerticalExaggeration.Value / 10.0);
             _terrainControl.SetColorMap(_cbColorMap.SelectedIndex);
+        }
+
+        private int _extraTileIndex = 0;
+        private void AddAnotherTileSample()
+        {
+            // Example: create another tile shifted east by 2000m (approx ~0.018° at 55.75 lat)
+            int cols = 200, rows = 150;
+            double[][] heights2 = SampleTerrainGenerator.Generate(cols, rows);
+
+            // compute approximate degree offset for width (approx meters per degree lon at 55.75N)
+            double lat = 55.75;
+            double metersPerDegLon = 111319.0 * Math.Cos(lat * Math.PI / 180.0);
+            double lonOffsetDeg = 2000.0 / metersPerDegLon;
+
+            GeoCoord start2 = new GeoCoord(55.7500, 37.6100 + _extraTileIndex * lonOffsetDeg);
+            GeoCoord end2 = new GeoCoord(55.7500, 37.6300 + _extraTileIndex * lonOffsetDeg);
+
+            var tile2 = new TerrainTile(heights2, start2, end2, 2000.0, 1500.0);
+
+            // Add tile to control (it will be drawn together with existing tiles)
+            _terrainControl.AddTile(tile2);
+            _extraTileIndex++;
         }
 
         private void LoadSampleRoute()
         {
             var route = new List<RoutePoint>()
-    {
-        new RoutePoint { Id=1, Latitude=55.7501, Longitude=37.5905, HeightAboveTerrain=10 },
-        new RoutePoint { Id=2, Latitude=55.7503, Longitude=37.5950, HeightAboveTerrain=20 },
-        new RoutePoint { Id=3, Latitude=55.7499, Longitude=37.6001, HeightAboveTerrain=15 },
-        new RoutePoint { Id=4, Latitude=55.7498, Longitude=37.6058, HeightAboveTerrain=5 },
-    };
+            {
+                new RoutePoint { Id=1, Latitude=55.7501, Longitude=37.5905, HeightAboveTerrain=10 },
+                new RoutePoint { Id=2, Latitude=55.7503, Longitude=37.5950, HeightAboveTerrain=20 },
+                new RoutePoint { Id=3, Latitude=55.7499, Longitude=37.6001, HeightAboveTerrain=15 },
+                new RoutePoint { Id=4, Latitude=55.7498, Longitude=37.6058, HeightAboveTerrain=5 },
+                // point outside tiles:
+                new RoutePoint { Id=5, Latitude=56.0000, Longitude=38.0000, HeightAboveTerrain=50 }
+            };
 
             _terrainControl.SetRoute(route);
         }

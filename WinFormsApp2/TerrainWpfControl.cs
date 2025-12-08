@@ -22,30 +22,61 @@ namespace WinFormsApp2
         public GeoCoord(double lat, double lon) { Latitude = lat; Longitude = lon; }
     }
 
+    public class TerrainTile
+    {
+        public double[][] Heights;
+        public GeoCoord Start;
+        public GeoCoord End;
+        public double WidthMeters;
+        public double HeightMeters;
+
+        public TerrainTile(double[][] heights, GeoCoord start, GeoCoord end, double widthMeters, double heightMeters)
+        {
+            Heights = heights ?? throw new ArgumentNullException(nameof(heights));
+            Start = start;
+            End = end;
+            WidthMeters = widthMeters;
+            HeightMeters = heightMeters;
+        }
+    }
+    public class RoutePoint
+    {
+        public int Id { get; set; }
+        public double Latitude { get; set; }
+        public double Longitude { get; set; }
+        // высота над поверхностью рельефа в метрах
+        public double HeightAboveTerrain { get; set; } = 0.0;
+    }
+
+
     public class TerrainWpfControl : System.Windows.Controls.UserControl
     {
         private readonly HelixViewport3D _view;
         private readonly Model3DGroup _rootModel;
-        private GeometryModel3D? _terrainModel;
-        private double[][]? _heights;
-        private GeoCoord _start = new GeoCoord(0, 0);
-        private GeoCoord _end = new GeoCoord(0, 0);
-        private double _widthMeters = 1000, _heightMeters = 1000;
+
+        // теперь — несколько тайлов
+        private readonly List<TerrainTile> _tiles = new();
+        // для каждого тайла — соответствующий GeometryModel3D
+        private readonly List<GeometryModel3D> _tileModels = new();
+
         private bool _curvatureEnabled = false;
         private double _verticalExag = 1.0;
         private int _colorMapIndex = 0;
+
+        // route visualization (как раньше)
+        private List<RoutePoint>? _routeCache = null;
         private ModelVisual3D? _routePointsVisual;
         private ModelVisual3D? _routeLinesVisual;
         private BillboardTextGroupVisual3D? _routeLabelsVisual;
         private ModelVisual3D? _routePoints;
         private LinesVisual3D? _routeLines;
         private List<BillboardTextVisual3D> _routeLabels = new();
+
+        // shared origin for curvature-based conversion (so different tiles stay aligned)
         private Vector3D? _curvatureOrigin = null;
-        private List<RoutePoint>? _routeCache = null;
 
         public TerrainWpfControl()
         {
-            // Build UI
             _view = new HelixViewport3D
             {
                 ShowCoordinateSystem = true,
@@ -56,8 +87,8 @@ namespace WinFormsApp2
 
             _view.Camera = new PerspectiveCamera
             {
-                Position = new Point3D(0, -_heightMeters * 1.5, _widthMeters * 0.6),
-                LookDirection = new Vector3D(0, _heightMeters * 1.5, -_widthMeters * 0.6),
+                Position = new Point3D(0, -1500, 600),
+                LookDirection = new Vector3D(0, 1500, -600),
                 UpDirection = new Vector3D(0, 0, 1),
                 FieldOfView = 45
             };
@@ -74,39 +105,48 @@ namespace WinFormsApp2
             Content = _view;
         }
 
-        /// <summary>
-        /// Set height data and bounding box in meters.
-        /// heights: jagged array [rows][cols] where rows->Y, cols->X
-        /// start and end: geo coords of midpoints of left and right edges (used for curvature)
-        /// widthMeters, heightMeters: horizontal extents in meters
-        /// </summary>
-        public void SetData(double[][] heights, GeoCoord start, GeoCoord end, double widthMeters, double heightMeters)
+        // --- API ---
+
+        // Заменяет все тайлы новыми
+        public void SetTiles(List<TerrainTile> tiles)
         {
-            _heights = heights ?? throw new ArgumentNullException(nameof(heights));
-            _start = start;
-            _end = end;
-            _widthMeters = widthMeters;
-            _heightMeters = heightMeters;
-            BuildTerrain();
+            if (tiles == null) throw new ArgumentNullException(nameof(tiles));
+            _tiles.Clear();
+            _tiles.AddRange(tiles);
+            RebuildAllTiles();
             ResetCamera();
+        }
+
+        // Добавляет один тайл (вместе с уже существующими)
+        public void AddTile(TerrainTile tile)
+        {
+            if (tile == null) throw new ArgumentNullException(nameof(tile));
+            _tiles.Add(tile);
+            RebuildAllTiles();
+        }
+
+        public void ClearTiles()
+        {
+            _tiles.Clear();
+            RebuildAllTiles();
         }
 
         public void SetVerticalExaggeration(double exag)
         {
             _verticalExag = Math.Max(1e-9, exag);
-            BuildTerrain();
+            RebuildAllTiles();
         }
 
         public void SetCurvatureEnabled(bool enabled)
         {
             _curvatureEnabled = enabled;
-            BuildTerrain();
+            RebuildAllTiles();
         }
 
         public void SetColorMap(int idx)
         {
             _colorMapIndex = idx;
-            BuildTerrain();
+            RebuildAllTiles();
         }
 
         public void ResetCamera()
@@ -123,159 +163,230 @@ namespace WinFormsApp2
             _view.ZoomExtents();
         }
 
-        private void BuildTerrain()
+        // --- Tiles building ---
+
+        private void RebuildAllTiles()
         {
-            if (_heights == null) return;
+            // remove existing tile models from root
+            foreach (var m in _tileModels)
+                _rootModel.Children.Remove(m);
+            _tileModels.Clear();
+
             _curvatureOrigin = null;
-
-            int rows = _heights.Length;
-            int cols = _heights[0].Length;
-            for (int r = 0; r < rows; r++)
-                if (_heights[r].Length != cols) throw new ArgumentException("All rows must have same length.");
-
-            var mesh = new MeshGeometry3D();
-
-            double dx = _widthMeters / (cols - 1);
-            double dy = _heightMeters / (rows - 1);
-
-            // find min/max height from input heights (before vertical exaggeration)
-            double minH = double.MaxValue, maxH = double.MinValue;
-            for (int r = 0; r < rows; r++)
-                for (int c = 0; c < cols; c++)
-                {
-                    double h = _heights[r][c];
-                    if (h < minH) minH = h;
-                    if (h > maxH) maxH = h;
-                }
-            if (maxH - minH < 1e-9) maxH = minH + 1e-9;
-
-            // build positions & uv
-            for (int r = 0; r < rows; r++)
+            if (_curvatureEnabled && _tiles.Count > 0)
             {
-                for (int c = 0; c < cols; c++)
+                // Compute a shared curvature origin to keep all curved tiles aligned
+                // We'll compute approximate center of all tiles in geodetic meters and map to sphere center.
+                double avgLat = 0.0, avgLon = 0.0;
+                foreach (var t in _tiles)
                 {
-                    double x = (c - (cols - 1) / 2.0) * dx;
-                    double y = ((rows - 1) / 2.0 - r) * dy;
-                    double z = _heights[r][c] * _verticalExag;
+                    avgLat += (t.Start.Latitude + t.End.Latitude) * 0.5;
+                    avgLon += (t.Start.Longitude + t.End.Longitude) * 0.5;
+                }
+                avgLat /= (_tiles.Count);
+                avgLon /= (_tiles.Count);
 
-                    if (_curvatureEnabled)
+                // choose nominal center at avgLat/avgLon and surface radius R
+                const double R = 6_371_000.0;
+                double phi = (90.0 - avgLat) * Math.PI / 180.0;
+                double theta = (avgLon + 180.0) * Math.PI / 180.0;
+                double px = R * Math.Sin(phi) * Math.Cos(theta);
+                double py = R * Math.Sin(phi) * Math.Sin(theta);
+                double pz = R * Math.Cos(phi);
+                _curvatureOrigin = new Vector3D(px, py, pz);
+            }
+
+            // Build each tile as its own mesh
+            for (int ti = 0; ti < _tiles.Count; ti++)
+            {
+                var tile = _tiles[ti];
+
+                if (tile.Heights == null) continue;
+                int rows = tile.Heights.Length;
+                if (rows == 0) continue;
+                int cols = tile.Heights[0].Length;
+                for (int r = 0; r < rows; r++)
+                    if (tile.Heights[r].Length != cols) throw new ArgumentException("All rows in tile must have same length.");
+
+                var mesh = new MeshGeometry3D();
+
+                double dx = tile.WidthMeters / (cols - 1);
+                double dy = tile.HeightMeters / (rows - 1);
+
+                // find min/max height from input heights (before vertical exaggeration)
+                double minH = double.MaxValue, maxH = double.MinValue;
+                for (int r = 0; r < rows; r++)
+                    for (int c = 0; c < cols; c++)
                     {
-                        double fx = c / (double)(cols - 1);
-                        double lat = _start.Latitude * (1 - fx) + _end.Latitude * fx;
-                        double lon = _start.Longitude * (1 - fx) + _end.Longitude * fx;
+                        double h = tile.Heights[r][c];
+                        if (h < minH) minH = h;
+                        if (h > maxH) maxH = h;
+                    }
+                if (maxH - minH < 1e-9) maxH = minH + 1e-9;
 
-                        double metersPerDegLat = 111132.0;
-                        double metersPerDegLon = 111319.0 * Math.Cos(lat * Math.PI / 180.0);
+                // build positions & uv
+                for (int r = 0; r < rows; r++)
+                {
+                    for (int c = 0; c < cols; c++)
+                    {
+                        double xLocal = (c - (cols - 1) / 2.0) * dx;
+                        double yLocal = ((rows - 1) / 2.0 - r) * dy;
+                        double z = tile.Heights[r][c] * _verticalExag;
 
-                        double lonPoint = lon + x / metersPerDegLon;
-                        double latPoint = lat + y / metersPerDegLat;
-
-                        double R = 6_371_000.0;
-                        double phi = (90.0 - latPoint) * Math.PI / 180.0;
-                        double theta = (lonPoint + 180.0) * Math.PI / 180.0;
-                        double radius = R + z;
-
-                        double px = radius * Math.Sin(phi) * Math.Cos(theta);
-                        double py = radius * Math.Sin(phi) * Math.Sin(theta);
-                        double pz = radius * Math.Cos(phi);
-
-                        // Normalize curvature so the area stays centered in local space
                         if (_curvatureEnabled)
                         {
-                            if (_curvatureOrigin == null)
-                                _curvatureOrigin = new Vector3D(px, py, pz);
+                            // compute geographic lat/lon for this column and row similar to previous logic:
+                            double fx = c / (double)(cols - 1);
+                            double lat = tile.Start.Latitude * (1 - fx) + tile.End.Latitude * fx;
+                            double lon = tile.Start.Longitude * (1 - fx) + tile.End.Longitude * fx;
 
-                            px -= _curvatureOrigin.Value.X;
-                            py -= _curvatureOrigin.Value.Y;
-                            pz -= _curvatureOrigin.Value.Z;
+                            double metersPerDegLat = 111132.0;
+                            double metersPerDegLon = 111319.0 * Math.Cos(lat * Math.PI / 180.0);
+
+                            double lonPoint = lon + xLocal / metersPerDegLon;
+                            double latPoint = lat + yLocal / metersPerDegLat;
+
+                            const double R = 6_371_000.0;
+                            double phi = (90.0 - latPoint) * Math.PI / 180.0;
+                            double theta = (lonPoint + 180.0) * Math.PI / 180.0;
+                            double radius = R + z;
+
+                            double px = radius * Math.Sin(phi) * Math.Cos(theta);
+                            double py = radius * Math.Sin(phi) * Math.Sin(theta);
+                            double pz = radius * Math.Cos(phi);
+
+                            if (_curvatureOrigin != null)
+                            {
+                                px -= _curvatureOrigin.Value.X;
+                                py -= _curvatureOrigin.Value.Y;
+                                pz -= _curvatureOrigin.Value.Z;
+                            }
+
+                            mesh.Positions.Add(new Point3D(px, py, pz));
+                        }
+                        else
+                        {
+                            // flat local coordinates (x,y,z) — but note: different tiles may have different local centers.
+                            // To align tiles consistently in local XY we position them by mapping tile center to world origin offset:
+                            // For simplicity we compute an XY offset based on the tile's longitudinal middle vs a reference (0,0) — but to keep compatibility
+                            // with your prior single-tile code we place each tile centered around its local (0,0). This keeps relative positions correct
+                            // when tiles are defined consistently in the same coordinate frame (Width/Height).
+                            mesh.Positions.Add(new Point3D(xLocal + TileWorldOffsetX(tile), yLocal + TileWorldOffsetY(tile), z));
                         }
 
-                        mesh.Positions.Add(new Point3D(px, py, pz));
+                        mesh.TextureCoordinates.Add(new System.Windows.Point(c / (double)(cols - 1), r / (double)(rows - 1)));
                     }
-                    else
-                    {
-                        mesh.Positions.Add(new Point3D(x, y, z));
-                    }
-
-                    mesh.TextureCoordinates.Add(new System.Windows.Point(c / (double)(cols - 1), r / (double)(rows - 1)));
                 }
-            }
 
-            // triangles
-            for (int r = 0; r < rows - 1; r++)
-            {
-                for (int c = 0; c < cols - 1; c++)
+                // triangles
+                for (int r = 0; r < rows - 1; r++)
                 {
-                    int i0 = r * cols + c;
-                    int i1 = i0 + 1;
-                    int i2 = i0 + cols;
-                    int i3 = i2 + 1;
+                    for (int c = 0; c < cols - 1; c++)
+                    {
+                        int i0 = r * cols + c;
+                        int i1 = i0 + 1;
+                        int i2 = i0 + cols;
+                        int i3 = i2 + 1;
 
-                    mesh.TriangleIndices.Add(i0);
-                    mesh.TriangleIndices.Add(i2);
-                    mesh.TriangleIndices.Add(i1);
+                        mesh.TriangleIndices.Add(i0);
+                        mesh.TriangleIndices.Add(i2);
+                        mesh.TriangleIndices.Add(i1);
 
-                    mesh.TriangleIndices.Add(i1);
-                    mesh.TriangleIndices.Add(i2);
-                    mesh.TriangleIndices.Add(i3);
+                        mesh.TriangleIndices.Add(i1);
+                        mesh.TriangleIndices.Add(i2);
+                        mesh.TriangleIndices.Add(i3);
+                    }
                 }
+
+                // normals
+                var normals = new Vector3D[mesh.Positions.Count];
+                for (int t = 0; t < mesh.TriangleIndices.Count; t += 3)
+                {
+                    int ia = mesh.TriangleIndices[t];
+                    int ib = mesh.TriangleIndices[t + 1];
+                    int ic = mesh.TriangleIndices[t + 2];
+
+                    var a = mesh.Positions[ia];
+                    var b = mesh.Positions[ib];
+                    var c = mesh.Positions[ic];
+
+                    var n = Vector3D.CrossProduct(b - a, c - a);
+                    normals[ia] += n;
+                    normals[ib] += n;
+                    normals[ic] += n;
+                }
+
+                var nc = new Vector3DCollection(normals.Length);
+                foreach (var v in normals)
+                {
+                    var nv = v;
+                    if (nv.LengthSquared > 1e-9) nv.Normalize();
+                    nc.Add(nv);
+                }
+                mesh.Normals = nc;
+
+                // texture/colormap
+                var bmp = CreateHeightColorBitmap(tile.Heights, minH, maxH, _colorMapIndex);
+                var imageBrush = new ImageBrush(bmp)
+                {
+                    ViewportUnits = BrushMappingMode.RelativeToBoundingBox,
+                    Stretch = Stretch.Fill
+                };
+
+                var mat = new DiffuseMaterial(imageBrush);
+                var back = new DiffuseMaterial(Brushes.Gray);
+
+                var model = new GeometryModel3D(mesh, mat) { BackMaterial = back };
+                _rootModel.Children.Add(model);
+                _tileModels.Add(model);
             }
 
-            // normals (accumulate per triangle)
-            var normals = new Vector3D[mesh.Positions.Count];
-            for (int t = 0; t < mesh.TriangleIndices.Count; t += 3)
-            {
-                int ia = mesh.TriangleIndices[t];
-                int ib = mesh.TriangleIndices[t + 1];
-                int ic = mesh.TriangleIndices[t + 2];
-
-                var a = mesh.Positions[ia];
-                var b = mesh.Positions[ib];
-                var c = mesh.Positions[ic];
-
-                var n = Vector3D.CrossProduct(b - a, c - a);
-                normals[ia] += n;
-                normals[ib] += n;
-                normals[ic] += n;
-            }
-
-            var nc = new Vector3DCollection(normals.Length);
-            foreach (var v in normals)
-            {
-                var nv = v;
-                if (nv.LengthSquared > 1e-9) nv.Normalize();
-                nc.Add(nv);
-            }
-            mesh.Normals = nc;
-
-            // --- Create color bitmap (texture) based on heights (pre-exaggeration) ---
-            var bmp = CreateHeightColorBitmap(_heights, minH, maxH, _colorMapIndex);
-
-            // Create ImageBrush from bitmap and apply to material
-            var imageBrush = new ImageBrush(bmp)
-            {
-                // map brush directly to mesh UVs (u=0..1, v=0..1)
-                ViewportUnits = BrushMappingMode.RelativeToBoundingBox,
-                Stretch = Stretch.Fill
-            };
-
-            var mat = new DiffuseMaterial(imageBrush);
-            var back = new DiffuseMaterial(Brushes.Gray);
-
-            if (_terrainModel != null) _rootModel.Children.Remove(_terrainModel);
-
-            _terrainModel = new GeometryModel3D(mesh, mat) { BackMaterial = back };
-            _rootModel.Children.Add(_terrainModel);
+            // rebuild route visuals so they follow new geometry
             RebuildRoute();
         }
 
-        // Build a bitmap where pixel (x,y) corresponds to height at [row=y][col=x]
+        // Compute a consistent XY offset for a tile when curvature is off.
+        // We'll map tiles into a shared flat local XY using the tile center projected to meters around an arbitrary origin (first tile center).
+        // For simplicity & determinism we compute tile offsets relative to first tile in list.
+        private double TileWorldOffsetX(TerrainTile tile)
+        {
+            if (_tiles == null || _tiles.Count == 0) return 0.0;
+            var refTile = _tiles[0];
+            // compute approximate longitudinal center for both tiles in meters offset
+            double refLat = (refTile.Start.Latitude + refTile.End.Latitude) * 0.5;
+            double metersPerDegLonRef = 111319.0 * Math.Cos(refLat * Math.PI / 180.0);
+            double refLonCenter = (refTile.Start.Longitude + refTile.End.Longitude) * 0.5;
+
+            double tileLat = (tile.Start.Latitude + tile.End.Latitude) * 0.5;
+            double tileLonCenter = (tile.Start.Longitude + tile.End.Longitude) * 0.5;
+
+            double dxDeg = (tileLonCenter - refLonCenter);
+            double dxMeters = dxDeg * metersPerDegLonRef;
+
+            return dxMeters;
+        }
+
+        private double TileWorldOffsetY(TerrainTile tile)
+        {
+            if (_tiles == null || _tiles.Count == 0) return 0.0;
+            var refTile = _tiles[0];
+            double refLat = (refTile.Start.Latitude + refTile.End.Latitude) * 0.5;
+            double refLatCenter = refLat;
+            double tileLat = (tile.Start.Latitude + tile.End.Latitude) * 0.5;
+
+            double metersPerDegLat = 111132.0;
+            double dyDeg = (tileLat - refLatCenter);
+            double dyMeters = dyDeg * metersPerDegLat;
+
+            return dyMeters;
+        }
+
+        // --- Color bitmap creation (как раньше) ---
         private BitmapSource CreateHeightColorBitmap(double[][] heights, double minH, double maxH, int cmapIndex)
         {
             int rows = heights.Length;
             int cols = heights[0].Length;
 
-            // We'll create BGRA32 bitmap
             int stride = cols * 4;
             byte[] pixels = new byte[rows * stride];
 
@@ -291,10 +402,10 @@ namespace WinFormsApp2
                     var col = ColorFromGradient(t, cmapIndex);
 
                     int idx = r * stride + c * 4;
-                    pixels[idx + 0] = col.B; // B
-                    pixels[idx + 1] = col.G; // G
-                    pixels[idx + 2] = col.R; // R
-                    pixels[idx + 3] = 255;   // A
+                    pixels[idx + 0] = col.B;
+                    pixels[idx + 1] = col.G;
+                    pixels[idx + 2] = col.R;
+                    pixels[idx + 3] = 255;
                 }
             }
 
@@ -334,19 +445,19 @@ namespace WinFormsApp2
             );
         }
 
+        // --- Route / labels / points handling ---
         public void SetRoute(List<RoutePoint> route)
         {
-            _routeCache = route;     // запоминаем оригинальный маршрут
-            RebuildRoute();          // строим визуализацию
+            _routeCache = route;
+            RebuildRoute();
         }
 
         private void RebuildRoute()
         {
-            if (_routeCache == null || _heights == null)
-                return;
-
-            // полностью пересобираем визуализацию маршрута
+            // clear existing visuals
             ClearRoute();
+
+            if (_routeCache == null) return;
 
             _routePoints = new ModelVisual3D();
             _routeLines = new LinesVisual3D()
@@ -356,7 +467,6 @@ namespace WinFormsApp2
             };
 
             Point3D? prev = null;
-
             foreach (var p in _routeCache)
             {
                 var pos = ConvertGeoToPoint(p.Latitude, p.Longitude, p.HeightAboveTerrain);
@@ -368,7 +478,6 @@ namespace WinFormsApp2
                 }
                 prev = pos;
 
-                // точка
                 var sphere = new SphereVisual3D()
                 {
                     Center = pos,
@@ -379,7 +488,6 @@ namespace WinFormsApp2
 
                 _routePoints.Children.Add(sphere);
 
-                // лейбл
                 var label = new BillboardTextVisual3D()
                 {
                     Text = $"#{p.Id}\nLat={p.Latitude:F5}\nLon={p.Longitude:F5}\nΔH={p.HeightAboveTerrain:F1}",
@@ -392,8 +500,8 @@ namespace WinFormsApp2
                 _view.Children.Add(label);
             }
 
-            _view.Children.Add(_routePoints);
-            _view.Children.Add(_routeLines);
+            if (_routePoints != null) _view.Children.Add(_routePoints);
+            if (_routeLines != null) _view.Children.Add(_routeLines);
         }
 
         private void ClearRoute()
@@ -412,92 +520,164 @@ namespace WinFormsApp2
             _routeLines = null;
         }
 
+        // --- Geo -> Point3D conversion (multi-tile aware) ---
+        // If a point lies within a tile, use that tile's heights for interpolation.
+        // If none found, place at surface radius (if curvature) or at flat XY with terrainBase = 0.
         private Point3D ConvertGeoToPoint(double lat, double lon, double extraHeight)
         {
-            if (_heights == null)
-                return new Point3D(0, 0, 0);
+            for (int ti = 0; ti < _tiles.Count; ti++)
+            {
+                var tile = _tiles[ti];
+                if (IsGeoInsideTile(tile, lat, lon, out double fx, out double fy))
+                {
+                    int rows = tile.Heights.Length;
+                    int cols = tile.Heights[0].Length;
 
-            int rows = _heights.Length;
-            int cols = _heights[0].Length;
+                    // colPos fraction along width
+                    double colPos = fx * (cols - 1);
 
-            // Safety
-            double totalLonDiff = _end.Longitude - _start.Longitude;
-            if (Math.Abs(totalLonDiff) < 1e-12) totalLonDiff = 1e-12;
+                    // --- FIX #1: correct rowPos sign ---
+                    double dy = tile.HeightMeters / (rows - 1);
+                    double rowCenter = (rows - 1) / 2.0;
+                    // north = fy positive → row decreases → sign must be +:
+                    double rowPos = rowCenter + (fy / dy);
+                    // ----------------------------------
 
-            // Fraction along columns (continuous, 0..1)
-            double fx = (lon - _start.Longitude) / totalLonDiff;
-            fx = Math.Max(0.0, Math.Min(1.0, fx));
+                    colPos = Math.Max(0.0, Math.Min(cols - 1, colPos));
+                    rowPos = Math.Max(0.0, Math.Min(rows - 1, rowPos));
 
-            // fractional column position in grid coordinates (0 .. cols-1)
-            double colPos = fx * (cols - 1);
+                    int c0 = (int)Math.Floor(colPos);
+                    int c1 = Math.Min(cols - 1, c0 + 1);
+                    int r0 = (int)Math.Floor(rowPos);
+                    int r1 = Math.Min(rows - 1, r0 + 1);
 
-            // choose fractional row (we historically used middle row)
-            double rowPos = (rows - 1) / 2.0;
+                    double s = colPos - c0;
+                    double t = rowPos - r0;
 
-            double dx = _widthMeters / (cols - 1);
-            double dy = _heightMeters / (rows - 1);
+                    double h00 = tile.Heights[r0][c0];
+                    double h10 = tile.Heights[r0][c1];
+                    double h01 = tile.Heights[r1][c0];
+                    double h11 = tile.Heights[r1][c1];
 
-            // x,y in meters (exact, using fractional col/row)
-            double x = (colPos - (cols - 1) / 2.0) * dx;
-            double y = ((rows - 1) / 2.0 - rowPos) * dy;
+                    double h0 = h00 * (1 - s) + h10 * s;
+                    double h1 = h01 * (1 - s) + h11 * s;
+                    double terrainBase = h0 * (1 - t) + h1 * t;
 
-            // Bilinear interpolation of terrain height at fractional (rowPos, colPos)
-            int c0 = (int)Math.Floor(colPos);
-            int c1 = Math.Min(cols - 1, c0 + 1);
-            int r0 = (int)Math.Floor(rowPos);
-            int r1 = Math.Min(rows - 1, r0 + 1);
+                    double finalH = terrainBase * _verticalExag + extraHeight;
 
-            double s = colPos - c0; // frac along columns
-            double t = rowPos - r0; // frac along rows (should be 0 if rowPos exactly middle integer)
+                    double dx = tile.WidthMeters / (cols - 1);
+                    double xLocal = (colPos - (cols - 1) / 2.0) * dx;
+                    double yLocal = ((rows - 1) / 2.0 - rowPos) * dy;
 
-            // fetch heights safely
-            double h00 = _heights[r0][c0];
-            double h10 = _heights[r0][c1];
-            double h01 = _heights[r1][c0];
-            double h11 = _heights[r1][c1];
+                    if (!_curvatureEnabled)
+                    {
+                        double x = xLocal + TileWorldOffsetX(tile);
+                        double y = yLocal + TileWorldOffsetY(tile);
+                        return new Point3D(x, y, finalH);
+                    }
 
-            // bilinear
-            double h0 = h00 * (1 - s) + h10 * s;
-            double h1 = h01 * (1 - s) + h11 * s;
-            double terrainBase = h0 * (1 - t) + h1 * t;
+                    // curvature
+                    double fxCol = colPos / (cols - 1);
+                    double latAtCol = tile.Start.Latitude * (1 - fxCol) + tile.End.Latitude * fxCol;
 
-            // apply vertical exaggeration and extra height
-            double finalH = terrainBase * _verticalExag + extraHeight;
+                    double metersPerDegLat = 111132.0;
+                    double metersPerDegLon = 111319.0 * Math.Cos(latAtCol * Math.PI / 180.0);
 
-            // If no curvature, return local XY + height
+                    double lonPoint = (tile.Start.Longitude * (1 - fxCol) + tile.End.Longitude * fxCol)
+                                       + xLocal / metersPerDegLon;
+                    double latPoint = latAtCol + yLocal / metersPerDegLat;
+
+                    const double R = 6_371_000.0;
+                    double phi = (90.0 - latPoint) * Math.PI / 180.0;
+                    double theta = (lonPoint + 180.0) * Math.PI / 180.0;
+                    double radius = R + finalH;
+
+                    double px = radius * Math.Sin(phi) * Math.Cos(theta);
+                    double py = radius * Math.Sin(phi) * Math.Sin(theta);
+                    double pz = radius * Math.Cos(phi);
+
+                    if (_curvatureOrigin != null)
+                    {
+                        px -= _curvatureOrigin.Value.X;
+                        py -= _curvatureOrigin.Value.Y;
+                        pz -= _curvatureOrigin.Value.Z;
+                    }
+
+                    return new Point3D(px, py, pz);
+                }
+            }
+
+            // point outside tiles
+            double finalNoTile = extraHeight;
+
             if (!_curvatureEnabled)
             {
-                return new Point3D(x, y, finalH);
+                double metersPerDegLon = 111319.0 * Math.Cos(lat * Math.PI / 180.0);
+                double metersPerDegLat2 = 111132.0;
+
+                double refLon = (_tiles.Count > 0) ? (_tiles[0].Start.Longitude + _tiles[0].End.Longitude) * 0.5 : 0.0;
+                double refLat = (_tiles.Count > 0) ? (_tiles[0].Start.Latitude + _tiles[0].End.Latitude) * 0.5 : 0.0;
+
+                double dxMeters = (lon - refLon) * metersPerDegLon;
+                double dyMeters = (lat - refLat) * metersPerDegLat2;
+
+                return new Point3D(dxMeters, dyMeters, finalNoTile);
             }
-
-            // For curvature: need to compute latPoint/lonPoint exactly as in BuildTerrain
-            // compute lat at this column like BuildTerrain did (lat lerp by fx)
-            double latAtCol = _start.Latitude * (1 - fx) + _end.Latitude * fx;
-            double metersPerDegLat = 111132.0;
-            double metersPerDegLon = 111319.0 * Math.Cos(latAtCol * Math.PI / 180.0);
-
-            double lonPoint = (_start.Longitude * (1 - fx) + _end.Longitude * fx) + x / metersPerDegLon;
-            double latPoint = latAtCol + y / metersPerDegLat;
-
-            const double R = 6_371_000.0;
-            double phi = (90.0 - latPoint) * Math.PI / 180.0;
-            double theta = (lonPoint + 180.0) * Math.PI / 180.0;
-
-            double radius = R + finalH;
-
-            double px = radius * Math.Sin(phi) * Math.Cos(theta);
-            double py = radius * Math.Sin(phi) * Math.Sin(theta);
-            double pz = radius * Math.Cos(phi);
-
-            // subtract same origin as BuildTerrain used (if computed)
-            if (_curvatureOrigin != null)
+            else
             {
-                px -= _curvatureOrigin.Value.X;
-                py -= _curvatureOrigin.Value.Y;
-                pz -= _curvatureOrigin.Value.Z;
-            }
+                const double R = 6_371_000.0;
+                double phi = (90.0 - lat) * Math.PI / 180.0;
+                double theta = (lon + 180.0) * Math.PI / 180.0;
+                double radius = R + finalNoTile;
 
-            return new Point3D(px, py, pz);
+                double px = radius * Math.Sin(phi) * Math.Cos(theta);
+                double py = radius * Math.Sin(phi) * Math.Sin(theta);
+                double pz = radius * Math.Cos(phi);
+
+                if (_curvatureOrigin != null)
+                {
+                    px -= _curvatureOrigin.Value.X;
+                    py -= _curvatureOrigin.Value.Y;
+                    pz -= _curvatureOrigin.Value.Z;
+                }
+
+                return new Point3D(px, py, pz);
+            }
         }
+
+
+        // Проверяет попадает ли геокоордината в тайл (приближённо, в метрах)
+        // Возвращает fx (0..1) вдоль ширины и fy (метры от центра по север/юг, положительное на север)
+        private bool IsGeoInsideTile(TerrainTile tile, double lat, double lon, out double fx, out double fyMeters)
+        {
+            fx = 0;
+            fyMeters = 0;
+
+            double metersPerDegLat = 111132.0;
+
+            double totalLonDiff = tile.End.Longitude - tile.Start.Longitude;
+            if (Math.Abs(totalLonDiff) < 1e-12)
+                return false;
+
+            fx = (lon - tile.Start.Longitude) / totalLonDiff;
+
+            // tolerance
+            if (fx < -0.01 || fx > 1.01)
+                return false;
+
+            // clamp
+            fx = Math.Max(0, Math.Min(1, fx));
+
+            // interpolate latitude on center axis
+            double latAtCol = tile.Start.Latitude * (1 - fx) + tile.End.Latitude * fx;
+
+            // vertical offset in meters
+            fyMeters = (lat - latAtCol) * metersPerDegLat;
+
+            // check height half-span
+            return Math.Abs(fyMeters) <= tile.HeightMeters / 2.0 + 1e-6;
+        }
+
+
     }
 }
